@@ -30,7 +30,7 @@ impl Duration {
     ///
     /// Based on [`google::protobuf::util::CreateNormalized`][1].
     /// [1]: https://github.com/google/protobuf/blob/v3.3.2/src/google/protobuf/util/time_util.cc#L79-L100
-    fn normalize(&mut self) {
+    pub fn normalize(&mut self) {
         // Make sure nanos is in the range.
         if self.nanos <= -NANOS_PER_SECOND || self.nanos >= NANOS_PER_SECOND {
             self.seconds += (self.nanos / NANOS_PER_SECOND) as i64;
@@ -98,7 +98,7 @@ impl Timestamp {
     ///
     /// Based on [`google::protobuf::util::CreateNormalized`][1].
     /// [1]: https://github.com/google/protobuf/blob/v3.3.2/src/google/protobuf/util/time_util.cc#L59-L77
-    fn normalize(&mut self) {
+    pub fn normalize(&mut self) {
         // Make sure nanos is in the range.
         if self.nanos <= -NANOS_PER_SECOND || self.nanos >= NANOS_PER_SECOND {
             self.seconds += (self.nanos / NANOS_PER_SECOND) as i64;
@@ -117,37 +117,55 @@ impl Timestamp {
     }
 }
 
-/// Converts a `std::time::SystemTime` to a `Timestamp`.
 impl From<time::SystemTime> for Timestamp {
-    fn from(time: time::SystemTime) -> Timestamp {
-        let duration = Duration::from(time.duration_since(time::UNIX_EPOCH).unwrap());
-        Timestamp {
-            seconds: duration.seconds,
-            nanos: duration.nanos,
-        }
+    fn from(system_time: time::SystemTime) -> Timestamp {
+        let (seconds, nanos) = match system_time.duration_since(time::UNIX_EPOCH) {
+            Ok(duration) => {
+                let seconds = i64::try_from(duration.as_secs()).unwrap();
+                (seconds, duration.subsec_nanos() as i32)
+            }
+            Err(error) => {
+                let duration = error.duration();
+                let seconds = i64::try_from(duration.as_secs()).unwrap();
+                let nanos = duration.subsec_nanos() as i32;
+                if nanos == 0 {
+                    (-seconds, 0)
+                } else {
+                    (-seconds - 1, 1_000_000_000 - nanos)
+                }
+            }
+        };
+        Timestamp { seconds, nanos }
     }
 }
 
-impl TryFrom<Timestamp> for time::SystemTime {
-    type Error = time::Duration;
-
-    /// Converts a `Timestamp` to a `SystemTime`, or if the timestamp falls before the Unix epoch,
-    /// a duration containing the difference.
-    fn try_from(mut timestamp: Timestamp) -> Result<time::SystemTime, time::Duration> {
+impl From<Timestamp> for time::SystemTime {
+    fn from(mut timestamp: Timestamp) -> time::SystemTime {
         timestamp.normalize();
-        if timestamp.seconds >= 0 {
-            Ok(time::UNIX_EPOCH
-                + time::Duration::new(timestamp.seconds as u64, timestamp.nanos as u32))
+        let system_time = if timestamp.seconds >= 0 {
+            time::UNIX_EPOCH + time::Duration::from_secs(timestamp.seconds as u64)
         } else {
-            let mut duration = Duration {
-                seconds: -timestamp.seconds,
-                nanos: timestamp.nanos,
-            };
-            duration.normalize();
-            Err(time::Duration::new(
-                duration.seconds as u64,
-                duration.nanos as u32,
-            ))
+            time::UNIX_EPOCH - time::Duration::from_secs((-timestamp.seconds) as u64)
+        };
+
+        system_time + time::Duration::from_nanos(timestamp.nanos as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::SystemTime;
+
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        #[test]
+        fn check_system_time_roundtrip(
+            system_time in SystemTime::arbitrary(),
+        ) {
+            prop_assert_eq!(SystemTime::from(Timestamp::from(system_time)), system_time);
         }
     }
 }
