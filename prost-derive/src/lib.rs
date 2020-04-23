@@ -12,8 +12,8 @@ use itertools::Itertools;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use syn::{
-    punctuated::Punctuated, Data, DataEnum, DataStruct, DeriveInput, Expr, Fields, FieldsNamed,
-    FieldsUnnamed, Ident, Variant,
+    punctuated::Punctuated, Data, DataEnum, DataStruct, DeriveInput, Fields, FieldsNamed,
+    FieldsUnnamed, Ident, ImplItem, ItemImpl, Variant,
 };
 
 mod field;
@@ -230,94 +230,69 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     Ok(expanded.into())
 }
 
-#[proc_macro_derive(Message, attributes(prost))]
-pub fn message(input: TokenStream) -> TokenStream {
-    try_message(input).unwrap()
-}
+fn try_enumeration(_attr: TokenStream, input: TokenStream) -> Result<TokenStream, Error> {
+    let mut impl_: ItemImpl = syn::parse(input)?;
 
-fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
-    let input: DeriveInput = syn::parse(input)?;
-    let ident = input.ident;
-
-    if !input.generics.params.is_empty() || input.generics.where_clause.is_some() {
-        bail!("Message may not be derived for generic type");
+    if !impl_.generics.params.is_empty() || impl_.generics.where_clause.is_some() {
+        bail!("enumeration may not be applied to generic types");
     }
 
-    let punctuated_variants = match input.data {
-        Data::Enum(DataEnum { variants, .. }) => variants,
-        Data::Struct(_) => bail!("Enumeration can not be derived for a struct"),
-        Data::Union(..) => bail!("Enumeration can not be derived for a union"),
-    };
+    if impl_.trait_.is_some() {
+        bail!("enumeration may not be applied to trait impls");
+    }
 
-    // Map the variants into 'fields'.
-    let mut variants: Vec<(Ident, Expr)> = Vec::new();
-    for Variant {
-        ident,
-        fields,
-        discriminant,
-        ..
-    } in punctuated_variants
-    {
-        match fields {
-            Fields::Unit => (),
-            Fields::Named(_) | Fields::Unnamed(_) => {
-                bail!("Enumeration variants may not have fields")
-            }
-        }
-
-        match discriminant {
-            Some((_, expr)) => variants.push((ident, expr)),
-            None => bail!("Enumeration variants must have a disriminant"),
-        }
+    let mut variants = Vec::new();
+    for item in &impl_.items {
+        let const_ = match item {
+            ImplItem::Const(const_) => const_.ident.clone(),
+            _ => bail!("enumeration may only be applied to impls with only consts"),
+        };
+        variants.push(const_);
     }
 
     if variants.is_empty() {
-        panic!("Enumeration must have at least one variant");
+        bail!("enumeration must be applied to impls with consts");
     }
 
-    let default = variants[0].0.clone();
+    let ty = &impl_.self_ty;
+    let is_valid = quote! {
+        /// Returns true if the enum's value corresponds to a known variant.
+        #[inline]
+        pub fn is_valid(&self) -> bool {
+            match self {
+                #(#ty::#variants)|* => true,
+                _ => false,
+            }
+        }
+    };
+    impl_
+        .items
+        .push(ImplItem::Method(syn::parse(is_valid.into()).unwrap()));
 
-    let is_valid = variants
-        .iter()
-        .map(|&(_, ref value)| quote!(#value => true));
-    let from = variants.iter().map(
-        |&(ref variant, ref value)| quote!(#value => ::std::option::Option::Some(#ident::#variant)),
-    );
-
-    let is_valid_doc = format!("Returns `true` if `value` is a variant of `{}`.", ident);
-    let from_i32_doc = format!(
-        "Converts an `i32` to a `{}`, or `None` if `value` is not a valid variant.",
-        ident
-    );
+    let default = &variants[0];
+    let ty = &impl_.self_ty;
 
     let expanded = quote! {
-        impl #ident {
-            #[doc=#is_valid_doc]
-            pub fn is_valid(value: i32) -> bool {
-                match value {
-                    #(#is_valid,)*
-                    _ => false,
-                }
-            }
+        #impl_
 
-            #[doc=#from_i32_doc]
-            pub fn from_i32(value: i32) -> ::std::option::Option<#ident> {
-                match value {
-                    #(#from,)*
-                    _ => ::std::option::Option::None,
-                }
+        impl ::std::default::Default for #ty {
+            #[inline]
+            fn default() -> #ty {
+                #ty::#default
             }
         }
 
-        impl ::std::default::Default for #ident {
-            fn default() -> #ident {
-                #ident::#default
+        impl ::std::convert::From<i32> for #ty {
+            #[inline]
+            fn from(value: i32) -> #ty {
+                #ty(value)
             }
         }
 
-        impl ::std::convert::From<#ident> for i32 {
-            fn from(value: #ident) -> i32 {
-                value as i32
+        impl ::std::convert::From<#ty> for i32 {
+            #[inline]
+            fn from(value: #ty) -> i32 {
+                value.0
             }
         }
     };
@@ -325,9 +300,9 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
     Ok(expanded.into())
 }
 
-#[proc_macro_derive(Enumeration, attributes(prost))]
-pub fn enumeration(input: TokenStream) -> TokenStream {
-    try_enumeration(input).unwrap()
+#[proc_macro_attribute]
+pub fn enumeration(attr: TokenStream, input: TokenStream) -> TokenStream {
+    try_enumeration(attr, input).unwrap()
 }
 
 fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {

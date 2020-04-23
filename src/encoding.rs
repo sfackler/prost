@@ -381,7 +381,12 @@ where
     Ok(())
 }
 
-pub fn skip_field<B>(wire_type: WireType, tag: u32, buf: &mut B, ctx: DecodeContext) -> Result<(), DecodeError>
+pub fn skip_field<B>(
+    wire_type: WireType,
+    tag: u32,
+    buf: &mut B,
+    ctx: DecodeContext,
+) -> Result<(), DecodeError>
 where
     B: Buf,
 {
@@ -743,6 +748,160 @@ fixed_width!(
     put_i64_le,
     get_i64_le
 );
+
+pub mod enumeration {
+    use super::*;
+
+    pub fn encode<T, B>(tag: u32, value: &T, buf: &mut B)
+    where
+        T: Copy,
+        i32: From<T>,
+        B: BufMut,
+    {
+        encode_key(tag, WireType::Varint, buf);
+        encode_varint(i32::from(*value) as u64, buf);
+    }
+
+    pub fn merge<T, B>(
+        wire_type: WireType,
+        value: &mut T,
+        buf: &mut B,
+        _: DecodeContext,
+    ) -> Result<(), DecodeError>
+    where
+        T: Copy + From<i32>,
+        i32: From<T>,
+        B: Buf,
+    {
+        check_wire_type(WireType::Varint, wire_type)?;
+        let new_value = decode_varint(buf)? as i32;
+        *value = T::from(new_value);
+        Ok(())
+    }
+
+    pub fn encode_repeated<T, B>(tag: u32, values: &[T], buf: &mut B)
+    where
+        T: Copy,
+        i32: From<T>,
+        B: BufMut,
+    {
+        for value in values {
+            encode(tag, value, buf);
+        }
+    }
+
+    pub fn encode_packed<T, B>(tag: u32, values: &[T], buf: &mut B)
+    where
+        T: Copy,
+        i32: From<T>,
+        B: BufMut,
+    {
+        if values.is_empty() {
+            return;
+        }
+
+        encode_key(tag, WireType::LengthDelimited, buf);
+        let len: usize = values
+            .iter()
+            .map(|v| encoded_len_varint(i32::from(*v) as u64))
+            .sum();
+        encode_varint(len as u64, buf);
+
+        for value in values {
+            encode_varint(i32::from(*value) as u64, buf);
+        }
+    }
+
+    pub fn merge_repeated<T, B>(
+        wire_type: WireType,
+        values: &mut Vec<T>,
+        buf: &mut B,
+        ctx: DecodeContext,
+    ) -> Result<(), DecodeError>
+    where
+        T: Default + Copy + From<i32>,
+        i32: From<T>,
+        B: Buf,
+    {
+        if wire_type == WireType::LengthDelimited {
+            // Packed.
+            merge_loop(values, buf, ctx, |values, buf, ctx| {
+                let mut value = Default::default();
+                merge(WireType::Varint, &mut value, buf, ctx)?;
+                values.push(value);
+                Ok(())
+            })
+        } else {
+            // Unpacked.
+            check_wire_type(WireType::Varint, wire_type)?;
+            let mut value = Default::default();
+            merge(wire_type, &mut value, buf, ctx)?;
+            values.push(value);
+            Ok(())
+        }
+    }
+
+    pub fn encoded_len<T>(tag: u32, value: &T) -> usize
+    where
+        T: Copy,
+        i32: From<T>,
+    {
+        key_len(tag) + encoded_len_varint(i32::from(*value) as u64)
+    }
+
+    pub fn encoded_len_repeated<T>(tag: u32, values: &[T]) -> usize
+    where
+        T: Copy,
+        i32: From<T>,
+    {
+        key_len(tag) * values.len()
+            + values
+                .iter()
+                .map(|value| encoded_len_varint(i32::from(*value) as u64))
+                .sum::<usize>()
+    }
+
+    pub fn encoded_len_packed<T>(tag: u32, values: &[T]) -> usize
+    where
+        T: Copy,
+        i32: From<T>,
+    {
+        if values.is_empty() {
+            0
+        } else {
+            let len = values
+                .iter()
+                .map(|value| encoded_len_varint(i32::from(*value) as u64))
+                .sum::<usize>();
+            key_len(tag) + encoded_len_varint(len as u64) + len
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+        use quickcheck::{quickcheck, TestResult};
+
+        use super::super::test::{check_collection_type, check_type};
+        use super::*;
+
+        quickcheck! {
+            fn check(value: i32, tag: u32) -> TestResult {
+                check_type(value, tag, WireType::Varint,
+                           encode, merge, encoded_len)
+            }
+            fn check_repeated(value: Vec<i32>, tag: u32) -> TestResult {
+                check_collection_type(value, tag, WireType::Varint,
+                                      encode_repeated, merge_repeated,
+                                      encoded_len_repeated)
+            }
+            fn check_packed(value: Vec<i32>, tag: u32) -> TestResult {
+                check_type(value, tag, WireType::LengthDelimited,
+                           encode_packed, merge_repeated,
+                           encoded_len_packed)
+            }
+        }
+    }
+}
 
 /// Macro which emits encoding functions for a length-delimited type.
 macro_rules! length_delimited {

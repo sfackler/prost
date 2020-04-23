@@ -281,7 +281,6 @@ impl Field {
 
         if let Ty::Enumeration(ref ty) = self.ty {
             let set = Ident::new(&format!("set_{}", ident_str), Span::call_site());
-            let set_doc = format!("Sets `{}` to the provided enum value.", ident_str);
             Some(match self.kind {
                 Kind::Plain(ref default) | Kind::Required(ref default) => {
                     let get_doc = format!(
@@ -292,12 +291,11 @@ impl Field {
                     quote! {
                         #[doc=#get_doc]
                         pub fn #ident(&self) -> #ty {
-                            #ty::from_i32(self.#ident).unwrap_or(#default)
-                        }
-
-                        #[doc=#set_doc]
-                        pub fn #set(&mut self, value: #ty) {
-                            self.#ident = value as i32;
+                            if self.#ident.is_valid() {
+                                self.#ident
+                            } else {
+                                #default
+                            }
                         }
                     }
                 }
@@ -310,12 +308,7 @@ impl Field {
                     quote! {
                         #[doc=#get_doc]
                         pub fn #ident(&self) -> #ty {
-                            self.#ident.and_then(#ty::from_i32).unwrap_or(#default)
-                        }
-
-                        #[doc=#set_doc]
-                        pub fn #set(&mut self, value: #ty) {
-                            self.#ident = ::std::option::Option::Some(value as i32);
+                            self.#ident.map(#ty::from).filter(#ty::is_valid).unwrap_or(#default)
                         }
                     }
                 }
@@ -527,7 +520,7 @@ impl Ty {
 
     pub fn module(&self) -> Ident {
         match *self {
-            Ty::Enumeration(..) => Ident::new("int32", Span::call_site()),
+            Ty::Enumeration(..) => Ident::new("enumeration", Span::call_site()),
             _ => Ident::new(self.as_str(), Span::call_site()),
         }
     }
